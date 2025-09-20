@@ -1,0 +1,43 @@
+How this single-file utility works (explanation — read after the code)
+Design philosophy
+Single-file for easy distribution and integration in existing pipelines.
+Uses strictly standard system tools available on RHEL-family systems (openssl, flock, rsync, tar, curl, jq, date, etc.).
+"Bash-native atomic deploys" are implemented by staging into a temporary directory, moving into a *.new directory, rotating the previous deployment to *.old, and then renaming — this ensures a near-atomic switchover visible to processes watching the target path.
+Concurrency-safe operations use flock to guard critical operations (Terraform, atomic deploys, backups).
+Encrypted backups rely on openssl enc -aes-256-gcm -pbkdf2 with a configurable KDF iteration count.
+Security features
+AES-256-GCM via OpenSSL for authenticated encryption (integrity + confidentiality).
+-pbkdf2 with high iteration count (KDF_ITER) to resist brute-force on passwords (adjust as your threat model requires).
+Strict directory permissions and umask to avoid leaking sensitive files.
+Uses flock to avoid concurrent state mutations.
+Logs to /var/log/java1kind_ops with rotation expected to be implemented externally (e.g., logrotate).
+Avoids embedding secrets in the script; passwords should be passed via secure channels (CI secrets, HashiCorp Vault, AWS Secrets Manager, etc.) — the script accepts passwords as arguments for simplicity but you should prefer environment-injected secrets or secret files with restricted permissions.
+Integration points
+Ansible: ansible-deploy creates a pre-run encrypted backup of /etc (example) and then runs ansible-playbook. Modify the backup source as needed.
+Terraform: terraform_apply runs terraform init and terraform apply under a named flock lock to avoid concurrent state changes. Works with varfiles.
+Puppet: puppet_backup encrypts Puppet config directories and pushes a success metric to Prometheus Pushgateway.
+Prometheus: prom_push_metric pushes simple gauge metrics to a Pushgateway endpoint (set PROM_PUSHGATEWAY).
+GitLab CI: gitlab_helper encrypts artifacts and performs atomic deploy followed by a restart command. In CI, provide the password via protected variables.
+Azure DevOps / GitHub: azure_health and github_health run simple reachability and metric queries. These are building blocks for richer health & telemetry checks.
+Certificate expiry: cert_check works against local .pem files or remote host:port, extracts expiry, emits Prometheus metric cert_expiry_days, and warns if expiry < 30 days.
+Operational notes & hardening recommendations
+Replace password-on-CLI patterns with secret mounts or OS keyring access for production.
+Integrate log rotation (e.g., /etc/logrotate.d/java1kind_ops) to avoid unbounded growth.
+Ensure OpenSSL version supports -aes-256-gcm (OpenSSL >=1.1 recommended).
+Hardening: run script under dedicated service account with minimal privileges; limit access to $BACKUP_DIR.
+Backups: integrate with object storage (S3/OSS) using secure credentials and server-side encryption. Consider using KMS for key management; the script provides local encryption and can be layered upon KMS-wrapped keys.
+Monitoring: set up Prometheus Pushgateway and scrape metrics. Add additional metrics (backup size, duration, last-success timestamp) as required.
+Where to place this script & how to run
+Suggested path: /usr/local/bin/java1kind_ops.sh (chmod 750, owned by root:ops)
+Suggested config edits: update PROM_PUSHGATEWAY, BACKUP_DIR, LOG_DIR near top of script to match site layout.
+Running from CI: call via job step with protected secrets injected into environment or passed securely to CLI.
+Example run:
+sudo /usr/local/bin/java1kind_ops.sh check-deps
+sudo /usr/local/bin/java1kind_ops.sh backup-encrypt /etc etcbackup 'S3cureP@ss'
+sudo /usr/local/bin/java1kind_ops.sh atomic-deploy /tmp/new-release /opt/myapp 'systemctl restart myapp'
+Extensibility ideas (things I added or you can add)
+Add S3/GCS/Azure Blob sink for encrypted backups.
+Integrate Vault to fetch encryption keys instead of using password-based KDF.
+Add native systemd service mode and unit files for scheduled backups and alerts.
+Add more granular Prometheus metrics including timings, sizes, and error codes; support Prometheus exposition endpoint (HTTP server) instead of Pushgateway.
+Add role-based dry-run across Ansible/Terraform/Puppet with automated rollback strategies using preserved .old directories and snapshot restoration.
